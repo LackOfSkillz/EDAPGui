@@ -145,11 +145,12 @@ class EDShipControl:
         if self.status_parser.get_gui_focus() == GuiFocusNoFocus:
             return True
 
-        # Go down to cockpit view. Bounded so a panel that won't close (or a missing
-        # UI_Back binding) can't trap us here forever spamming keys.
+        # Go down to cockpit view.
+        # Fork RP1: bounded at max_presses. The original pressed UI_Back in a loop with no limit and no pause, so
+        # a panel that wouldn't close (or a missing UI_Back binding) trapped us here forever.
         for _ in range(max_presses):
             self.keys.send("UI_Back")  # make sure back in cockpit view
-            # Give the game a moment to update Status.json before checking again.
+            # Fork RP1: give the game a moment to update Status.json before checking again.
             sleep(0.2)
             if self.status_parser.get_gui_focus() == GuiFocusNoFocus:
                 return True

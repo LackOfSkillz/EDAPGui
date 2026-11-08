@@ -76,14 +76,17 @@ class NavRouteParser:
         if not os.path.exists(self.file_path):
             return None
 
-        # Check if file changed. Capture the time BEFORE reading so a write that lands while we read is
-        # picked up on the next call rather than masked.
+        # Check if file changed.
+        # Fork RP1: captured BEFORE reading. The original read the time AFTER, so a write landing during the read
+        # was marked as seen and its data stayed stale until the next write.
         mod_time = self.get_file_modified_time()
         if mod_time == self.last_mod_time:
             #logger.debug(f'NavRoute.json mod timestamp {self.last_mod_time} unchanged.')
             return self.current_data
 
-        # Read file (bounded retries; the game may be part way through writing it)
+        # Read file.
+        # Fork RP1: bounded retries (about 6.5 s, see JsonFile.py). The original retried forever with a sleep
+        # that doubled each time (1s, 2s, 4s, 8s...), which could stall the caller for minutes.
         data = read_game_json(self.file_path, 'NavRoute.json')
         if data is None:
             # Keep the last good data. last_mod_time is unchanged, so the next call retries.
@@ -91,7 +94,7 @@ class NavRouteParser:
 
         # Store data
         self.current_data = data
-        self.last_mod_time = mod_time
+        self.last_mod_time = mod_time  # Fork RP1: the time captured before reading (see above)
         #logger.debug(f'NavRoute.json mod timestamp {self.last_mod_time} updated.')
         # print(json.dumps(data, indent=4))
         return data

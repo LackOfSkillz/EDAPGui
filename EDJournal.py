@@ -211,21 +211,27 @@ def check_station_type(station_type: str, station_name: str, station_services: l
         return StationType.Unknown
 
 
-# How often to rescan the journal folder for a newer Journal file. A rescan walks the whole folder, which holds
-# thousands of files for long-time players, so it must not happen on every ship_state() call.
+# Fork RP1: how often to rescan the journal folder for a newer Journal file. The original rescanned the whole
+# folder (thousands of files for long-time players) on every ship_state() call: 100+ call sites, and every
+# 50 ms in the SC loop.
 JOURNAL_RESCAN_INTERVAL_SEC = 2.0
 
 
 class EDJournal:
     def __init__(self, cb):
+        # Fork RP1: the callback is now reached through the ap_ckb() method so messages raised during a locked
+        # read can be deferred (see ap_ckb).
         self._cb = cb
-        # ship_state() is called from the AP thread, the SCO monitor thread and others, all sharing one file
-        # handle. The lock serialises reads; GUI callbacks raised during a read are deferred until it is released.
+        # Fork RP1: ship_state() is called from the AP thread, the SCO monitor thread and others, all sharing one
+        # file handle, and the original had no locking. The lock serialises reads; GUI callbacks raised during a
+        # read are deferred until it is released.
         self._lock = threading.RLock()
         self._tls = threading.local()
+        # Fork RP1: cache for the latest-journal lookup (see get_latest_log).
         self._journal_dir = None
         self._latest_log_cache = None
         self._latest_log_checked_at = 0.0
+        # Fork RP1: holds a line the game hasn't finished writing yet (see _read_new_lines).
         self._partial_line = b''
         self.last_mod_time = None
         self.log_file = None
@@ -279,7 +285,10 @@ class EDJournal:
         return os.path.getmtime(self.current_log)
 
     def _change_key(self) -> tuple[int, int]:
-        """ Returns (modified time in ns, size) of the open journal, used to detect new lines. """
+        """ Returns (modified time in ns, size) of the open journal, used to detect new lines.
+        Fork RP1: added. The original compared modification time only. File times tick every few ms (~15 ms on
+        Windows), so a line appended in the same tick as the last read went unnoticed until the next write.
+        The journal is append-only, so its size always changes. """
         st = os.stat(self.current_log)
         return st.st_mtime_ns, st.st_size
 
@@ -290,8 +299,11 @@ class EDJournal:
         self.ship['fighter_destroyed'] = False
 
     def ap_ckb(self, msg, body=None):
-        """ Callback to the GUI. While a journal read is in progress the messages are queued and delivered
-        once the lock is released, so a GUI callback can never deadlock against the journal lock. """
+        """ Callback to the GUI.
+        Fork RP1: was a plain attribute holding the callback. It is now a method so that, while a journal read
+        holds the lock, messages are queued and delivered once the lock is released. A GUI callback updates Tk
+        from this thread, which waits on the GUI thread; if the GUI thread were waiting on the journal lock at
+        the same time, both would hang. """
         pending = getattr(self._tls, 'pending', None)
         if pending is not None:
             pending.append((msg, body))
@@ -299,7 +311,10 @@ class EDJournal:
             self._cb(msg, body)
 
     def get_journal_dir(self) -> str:
-        """ Returns the folder the game writes its journals to. """
+        """ Returns the folder the game writes its journals to.
+        Fork RP1: split out of get_latest_log() and cached. The original built the path with
+        "\\Frontier Developments\\Elite Dangerous", whose "\\F" is an invalid escape sequence and a
+        SyntaxWarning since Python 3.12. """
         if self._journal_dir is None:
             self._journal_dir = join(get_path(FOLDERID.SavedGames, UserHandle.current),
                                      "Frontier Developments", "Elite Dangerous")
@@ -307,7 +322,8 @@ class EDJournal:
 
     def get_latest_log(self, path_logs=None, force: bool = False):
         """Returns the full path of the latest (most recent) elite log file (journal) from specified path.
-        When no path is given, the result is cached for JOURNAL_RESCAN_INTERVAL_SEC unless force is True."""
+        Fork RP1: when no path is given, the result is cached for JOURNAL_RESCAN_INTERVAL_SEC unless force is
+        True. The original listed the folder and stat'ed every journal on every call."""
         if path_logs:
             return self._scan_for_latest_log(path_logs)
 
@@ -320,8 +336,9 @@ class EDJournal:
 
     @staticmethod
     def _scan_for_latest_log(path_logs):
-        """ Returns the most recently modified Journal file in the folder, or None. Uses scandir, which on
-        Windows returns file times with the directory listing instead of needing a stat call per file. """
+        """ Returns the most recently modified Journal file in the folder, or None.
+        Fork RP1: uses scandir, which on Windows returns file times with the directory listing, instead of
+        listdir plus a separate getmtime call per file. """
         latest_path = None
         latest_key = None
         with os.scandir(path_logs) as entries:
@@ -331,7 +348,8 @@ class EDJournal:
                 try:
                     if not entry.is_file():
                         continue
-                    # Name breaks ties between files written in the same clock tick (i.e. .01 vs .02 parts).
+                    # Fork RP1: name breaks ties between files written in the same clock tick (.01 vs .02 parts),
+                    # so the later part wins instead of whichever the folder listing happens to return first.
                     key = (entry.stat().st_mtime, entry.name)
                 except OSError:
                     continue  # File vanished between listing and stat.
@@ -347,13 +365,17 @@ class EDJournal:
 
         logger.info("Opening new Journal: "+log_name)
 
-        # open the latest journal. Binary mode: lines are decoded only once complete, so catching the game
-        # mid-write inside a multi-byte character can't raise a decode error.
+        # open the latest journal.
+        # Fork RP1: binary mode, not text. Lines are decoded only once complete. In text mode, catching the game
+        # mid-write inside a multi-byte character (non-English names) raised UnicodeDecodeError and stopped the
+        # running assist.
         self.log_file = open(log_name, 'rb')
-        # Track which journal is open. Without this, a newer journal (e.g. after a game restart) is
-        # reopened and replayed from the first line on every ship_state() call.
+        # Fork RP1: track which journal is open. The original only set current_log in __init__, so after a game
+        # restart the new journal was reopened and replayed from line 1 on every ship_state() call, re-firing
+        # one-shot events and inflating mission_completed / mission_redirected (used by Robigo).
         self.current_log = log_name
         self.last_mod_time = None
+        # Fork RP1: a partial line from the previous journal must not leak into this one.
         self._partial_line = b''
 
     def parse_line(self, log):
@@ -655,7 +677,10 @@ class EDJournal:
                 write_construction(const, filepath)
 
     def ship_state(self):
-        """ Reads any new journal lines and returns the ship state dictionary. Safe to call from any thread. """
+        """ Reads any new journal lines and returns the ship state dictionary. Safe to call from any thread.
+        Fork RP1: now a thin wrapper that takes the lock and, once it is released, delivers any GUI messages
+        raised during the read. The reading itself moved to _read_new_lines(). Only the outermost call (should
+        parsing ever re-enter ship_state on the same thread) collects and delivers the messages. """
         outermost = getattr(self._tls, 'pending', None) is None
         if outermost:
             self._tls.pending = []
@@ -673,14 +698,15 @@ class EDJournal:
         """ Reads and parses any lines added to the journal since the last call. Caller must hold the lock. """
         latest_log = self.get_latest_log()
 
-        # open journal file if not open yet or there is a more recent journal
+        # open journal file if not open yet or there is a more recent journal.
+        # Fork RP1: also skip when no journal was found, rather than calling open_journal(None).
         if latest_log is not None and (self.current_log is None or self.current_log != latest_log):
             self.open_journal(latest_log)
 
-        # Check if file changed. Use size as well as time: file times only tick every few ms (~15 ms on
-        # Windows), so a line appended in the same tick as our last read would otherwise be missed until the
-        # next write. The journal is append-only, so its size always grows. Capture this BEFORE reading so
-        # lines written while we read are picked up on the next call.
+        # Check if file changed.
+        # Fork RP1: two fixes. (1) Size as well as time (see _change_key). (2) Captured BEFORE reading. The
+        # original read the time AFTER, so a line written while we were reading was marked as seen and sat
+        # unread until the game wrote again (e.g. a DockingGranted the AP is waiting on).
         mod_time = self._change_key()
         if mod_time == self.last_mod_time:
             return
@@ -692,8 +718,8 @@ class EDJournal:
             if not line:
                 break
 
-            # The game may be part way through writing a line. Hold on to the partial line until the
-            # rest arrives, rather than failing to parse it.
+            # Fork RP1: the game may be part way through writing a line. Hold on to the partial line until the
+            # rest arrives. The original passed it straight to loads(), which raised and stopped the assist.
             if not line.endswith(b'\n'):
                 self._partial_line += line
                 break
@@ -701,6 +727,8 @@ class EDJournal:
                 line = self._partial_line + line
                 self._partial_line = b''
 
+            # Fork RP1: decode only complete lines (see open_journal). Skip blank lines, and skip a corrupt line
+            # with a warning; the original raised, which stopped whichever assist was running.
             text = line.decode('utf-8', errors='replace').strip()
             if not text:
                 continue
@@ -710,7 +738,7 @@ class EDJournal:
                 logger.warning(f"Skipping unreadable journal line: {text[:200]!r}")
                 continue
             if not isinstance(log, dict):
-                continue
+                continue  # Fork RP1: every journal event is a JSON object; guards the log.get() below.
 
             cnt = cnt + 1
             current_jrnl = self.ship.copy()
@@ -719,12 +747,12 @@ class EDJournal:
             if self.ship != current_jrnl:
                 logger.debug('Journal*.log: read: '+str(cnt)+' ship: '+str(self.ship))
 
-            # The game is moving to a new journal file, so look for it on the next call instead of
-            # waiting for the periodic rescan.
+            # Fork RP1: the game is moving to a new journal file, so look for it on the next call instead of
+            # waiting up to JOURNAL_RESCAN_INTERVAL_SEC for the periodic rescan.
             if log.get('event') in ('Continued', 'Shutdown'):
                 self._latest_log_checked_at = 0.0
 
-        self.last_mod_time = mod_time
+        self.last_mod_time = mod_time  # Fork RP1: the key captured before reading (see above)
 
 
 def write_construction(data, filename='./configs/construction.json'):

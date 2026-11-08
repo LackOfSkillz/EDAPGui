@@ -9,6 +9,7 @@ from EDlogger import logger
 File: JsonFile.py
 
 Description:
+  Fork RP1: added in this fork (reliability pass 1, see FORK_CHANGELOG.md).
   Shared, bounded reader for the JSON files the game rewrites in place (Status.json, NavRoute.json,
   Cargo.json, Market.json, FleetCarrier.json). The game can be part way through a write when we read,
   so a failed read is retried with a short backoff. Unlike the previous per-parser loops, the number of

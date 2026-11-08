@@ -205,9 +205,11 @@ class StatusParser:
             }
         }
         """
-        # Check if file changed. Capture this BEFORE reading: the game rewrites this file constantly, and
-        # checking afterwards can record a newer write than the data we hold, leaving flags stale. Size is
-        # included because file times only tick every few ms, so time alone can miss a quick rewrite.
+        # Check if file changed.
+        # Fork RP1: captured BEFORE reading. The game rewrites this file constantly; the original read the time
+        # AFTER, which could record a newer write than the data we hold and leave flags stale until the next
+        # write. Size is included because file times only tick every few ms, so time alone can miss a quick
+        # rewrite. (A same-size rewrite within one tick can still be missed, but that is much rarer.)
         st = os.stat(self.file_path)
         mod_time = (st.st_mtime_ns, st.st_size)
         if mod_time == self.last_mod_time:
@@ -215,7 +217,10 @@ class StatusParser:
             #print(f'Status.json mod timestamp {self.last_mod_time} unchanged.')
             return self.current_data
 
-        # Read file (bounded retries; the game may be part way through writing it)
+        # Read file.
+        # Fork RP1: bounded retries (about 6.5 s, see JsonFile.py). The original retried forever, hanging the
+        # caller, and the whole app at startup, if the file stayed unreadable. With no data yet, raise a clear
+        # error instead.
         data = read_game_json(self.file_path, 'Status.json')
         if data is None:
             if self.current_data is None:
@@ -295,7 +300,7 @@ class StatusParser:
         # Store data
         self.last_data = self.current_data
         self.current_data = cleaned_data
-        self.last_mod_time = mod_time
+        self.last_mod_time = mod_time  # Fork RP1: the key captured before reading (see above)
         # logger.debug(f'Status.json mod timestamp {self.last_mod_time} updated.')
         # print(f'Status.json mod timestamp {self.last_mod_time} updated.')
         # print(json.dumps(data, indent=4))
