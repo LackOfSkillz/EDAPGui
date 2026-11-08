@@ -4,9 +4,101 @@ Changes made in this fork ([LackOfSkillz/EDAPGui](https://github.com/LackOfSkill
 
 **Forked from:** upstream `main` at `8e15ca6` (v1.9.3 plus merged PRs through #149, 2026-09-22).
 
-Entries are labelled by date and branch rather than version number, so they don't collide with upstream releases.
+Entries are labelled by date and branch rather than version number, so they don't collide with upstream releases. Newest first.
 
 **Code comments.** Every changed spot in the code carries a tag comment saying what the original did and why it was changed. Each pass has its own tag: `Fork RP1:` for reliability pass 1, `Fork RP2:` for the next, and so on. `git grep "Fork RP1"` lists every change from a pass.
+
+**Tests.** `python -m unittest discover -s test/offline -v` runs the offline tests (no game needed; just `numpy` and `opencv-python-headless`). They also run automatically on GitHub for every push, once Actions are enabled on the fork (Actions tab, then "I understand my workflows, go ahead and enable them").
+
+---
+
+## 2026-11-08: Reliability pass 2
+
+Branch `reliability-pass-2`, stacked on pass 1, [PR #2](https://github.com/LackOfSkillz/EDAPGui/pull/2). Code comments are tagged `Fork RP2:`.
+
+Bug fixes plus one deliberate behaviour change: the autopilot now keeps its keys going to Elite when another window takes focus.
+
+### Supercruise disengage detection (`OCR.py`, `ED_AP.py`)
+
+- **Fixed: one OCR failure could stop SC Assist from ever dropping out at its destination.**
+  - When OCR failed, the error handler saved the image to `./ocr_output/<name>`, with no file extension, in a folder nothing created. OpenCV raises on a name without an extension (tested), so the handler meant to recover from the failure crashed itself.
+  - For the "disengage" check, that crash killed the supercruise-overcharge monitor thread, which had no error handling.
+  - That thread is the only thing that detects the disengage prompt, so SC Assist kept flying past its destination.
+  - Now the image is saved as a timestamped `.png`, the folder is created, and saving can't raise.
+- **Fixed:** the monitor thread now logs any error and carries on with its next check, instead of dying silently.
+
+### Config files can no longer be wiped (`JsonFile.py` and every file that saves settings)
+
+- **Fixed: a crash mid-save could wipe your settings and ship tuning.** Config files were written in place, so a crash, kill or power cut mid-save left a truncated file. On the next start, `AP.json` and `ship_configs.json` (every ship's RPY calibration) were then silently replaced with defaults.
+  - All of EDAP's own files are now written to a temporary file and swapped in with one rename, so a file is always either the old version or the new one: `AP.json`, `ship_configs.json`, waypoint files, `resolution.json`, `ocr_calibration.json`, `construction.json`.
+  - If `AP.json` or `ship_configs.json` still can't be read, it is kept as `<name>.unreadable-<date-time>` and a warning appears in the GUI log, instead of it being overwritten.
+- **Fixed:** a corrupt `ocr_calibration.json` crashed startup. It is now kept as a backup and the built-in regions are used.
+
+### Keys always go to Elite (`EDKeys.py`, `Screen.py`, `EDGalaxyMap.py`, `EDAPGui.py`)
+
+- **Changed: Elite is brought back to the front before every autopilot keystroke.** Windows only delivers simulated keys to the focused window. When a notification, dialog or alt-tab took focus, the autopilot's keys went into that window and Elite missed them mid-maneuver.
+  - Before every key press and release, EDAP checks that Elite has focus. This costs almost nothing when it does.
+  - If it doesn't, EDAP takes focus back. A GUI log line names the window that took it, at most once every 10 seconds.
+  - The autopilot never pauses or stops for this. If Elite can't be brought forward within 1 second, the key is sent anyway and a warning is logged.
+  - The release of a held key is checked too, so a window popping up mid-hold can't leave Elite thinking the key is still down.
+- **Fixed:** bringing Elite forward was unreliable. Windows often refuses a background program's request to change focus, and the original hid that failure. There's now a standard fallback for that case. It also no longer calls `ShowWindow(SW_NORMAL)` every time, which could resize the game window; it only restores a minimised window.
+- Galaxy map system names are now typed one character at a time with the focus check, so a pop-up can't receive half a system name.
+- The "Activate Elite for each key" option is now redundant. It is shown greyed out as "Keep Elite focused (now automatic)" and kept in config files so they still load.
+
+### Install and launch (`start_ed_ap.bat`, `install_requirements.bat`, `readme.md`, `requirements.txt`, `.gitattributes`)
+
+- **Fixed: the launcher's checks never worked.** Nearly all of `start_ed_ap.bat` ran inside one `if ( ... )` block, where cmd.exe reads `%errorlevel%` once, at the start of the block. So:
+  - The Python version checks never saw real results; it always tried `py -3.11`.
+  - A failed requirements install still reported success and launched.
+  - The script is now flat, so every check sees the real result.
+- **Fixed: a failed install stuck forever.** Setup counted as done once the `venv` folder existed, so every launch after a failed install skipped setup and started a broken environment. Setup now only counts as done once the requirements install successfully.
+  - An existing venv on a supported Python is reused: pip is simply run again, which takes seconds when everything is installed.
+  - A venv on an unsupported Python is rebuilt.
+- **Fixed: unsupported Python versions.** The launcher, installer and readme offered Python 3.9 and 3.10, but the pinned requirements can't install on them. Resolving the requirements for Windows per version showed:
+  - 3.9 and 3.10 fail: pandas 3.0.3, scipy 1.17.1, contourpy 1.3.3 and networkx 3.6.1 are 3.11+ only.
+  - 3.14 fails: PaddlePaddle 3.2.2 has no 3.14 build.
+  - 3.11, 3.12 and 3.13 all resolve. Both scripts now accept only those, preferring 3.11, and the readme is corrected.
+- **Fixed:** `install_requirements.bat` also reported success when pip failed.
+- **Fixed:** batch files were stored with Unix line endings, and "Download ZIP" (the readme's recommended install) delivered them that way. cmd.exe can fail to find `goto` labels in such files. `.gitattributes` now gives them Windows line endings on checkout and in ZIP downloads.
+- `requirements.txt` re-saved as UTF-8; same packages and versions. As UTF-16, git treated it as binary, so changes to it never showed in diffs.
+- **Fixed:** the same invalid `"\F"` escape fixed in pass 1, in the key bindings folder path in `EDKeys.py`.
+
+### Tests and CI (`test/offline/`, `.github/workflows/offline-tests.yml`)
+
+- **Added:** 28 offline tests covering pass 1 and pass 2. They need neither the game nor Windows: Windows-only modules are replaced with stand-ins, and the focus guard is tested with simulated window changes.
+- **Added:** a GitHub Actions workflow that runs on every push and pull request, on Windows, with Python 3.11, 3.12 and 3.13:
+  - compiles every file with warnings treated as errors,
+  - lints for real bugs (syntax errors, undefined names),
+  - runs the offline tests.
+  - The existing workflow was disabled (`if: false`) and targeted Python 3.9.
+- `.gitignore` now ignores Python caches in every folder.
+
+### Behaviour changes you might notice
+
+| Situation | Before | Now |
+|---|---|---|
+| A pop-up or alt-tab takes focus during a run | Autopilot keys go into that window and Elite misses them | Elite is brought back before the next key; GUI log names the window |
+| You're typing in another window during a run | The autopilot types into your window | Elite takes focus back at its next keypress, so your typing may then go to Elite |
+| OCR fails while approaching a station | Disengage detection could die, so SC Assist overshoots | Logged; detection carries on |
+| A config file is unreadable at startup | Silently replaced with defaults | Kept as `<name>.unreadable-<date-time>`, defaults used, warning in GUI log |
+| `start_ed_ap.bat` with only Python 3.9 or 3.10 | Install fails part-way, then launches broken | Clear message to install 3.11 |
+| `start_ed_ap.bat` after a failed install | Skips setup and launches broken | Runs setup again |
+| First launch after updating, with a working venv | n/a | Runs pip once (seconds), then starts |
+| "Activate Elite for each key" option | Off by default | Always on, option greyed out |
+
+### Testing
+
+- 28 offline tests pass, with no unclosed-file warnings.
+- The whole repo compiles with warnings as errors and passes the bug lint.
+- Checked against the real tools: OpenCV's behaviour for the error-path file name, and pip's resolution of the pinned requirements on Windows for Python 3.9 through 3.14.
+- The batch files and the Windows focus code were also desk-reviewed independently, since they can't run here.
+- **Not yet tested on Windows or in game.** Before merging:
+  - [ ] Fresh "Download ZIP" install with Python 3.11 via `start_ed_ap.bat`
+  - [ ] Launch with your existing `venv`: pip runs briefly, then EDAP starts
+  - [ ] During an FSD route, alt-tab to another window: Elite comes back at the next key, and the GUI log names the window
+  - [ ] Supercruise Assist to a station: drops at the disengage prompt
+  - [ ] Settings tab: "Keep Elite focused (now automatic)" is greyed out
+  - [ ] Enable Actions on the fork and check the "Offline tests" workflow passes
 
 ---
 
@@ -90,11 +182,12 @@ Remaining items from the initial analysis, not started yet:
 - **Safety supervisor.** Watch hull, under-attack, heat and fuel across every mode, with an escalation ladder: log, evade, abort, logout.
 - **Condition-based docking and positioning.** Replace fixed timers with signals the game reports, such as the journal's docking "Distance" denial.
 - **Status events and notifications.** Publish jump, docked, refuelled and aborted (with reason) events over EDMesg, then add Discord or phone alerts on abort.
-- **Replay testing.** Record Status.json, journal and screen frames during a run and replay them offline. Add the offline harness to the repo as proper tests, and re-enable CI.
+- **Replay testing.** Record Status.json, journal and screen frames during a run and replay them offline. (Offline unit tests and CI were added in pass 2.)
 - **Assist framework.** An `Assist` base class and registry to replace the seven copy-pasted blocks in `engine_loop`.
 - **Housekeeping.**
-  - Remove dead code (the old `refuel()`).
-  - Split `requirements.txt` into core and ML extras; it's currently a UTF-16 pip freeze that includes torch.
+  - Remove dead code: the old `refuel()`, and about 20 unused variables flagged by lint.
+  - Route the ~70 `print()` calls through the logger so they reach `autopilot.log`.
+  - Split `requirements.txt` into core and ML extras; it's a full pip freeze that includes torch.
   - Check licensing: `ultralytics` is AGPL-3.0, inside an MIT repo.
 
 ---
