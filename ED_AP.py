@@ -886,7 +886,15 @@ class EDAutopilot:
         self.ap_ckb('log', 'Interdiction detected.')
 
         # Keep setting speed to zero to submit while in supercruise or system jump.
+        # Fork RP1: bounded at 60 s. The original looped forever if we never dropped out of supercruise,
+        # holding zero throttle indefinitely.
+        submit_start = time.time()
         while self.status.get_flag(FlagsSupercruise) or self.status.get_flag2(Flags2FsdHyperdriveCharging):
+            if time.time() - submit_start > 60:
+                logger.warning("Interdiction: still in supercruise 60s after submitting. Resuming.")
+                self.ap_ckb('log', 'Interdiction: did not drop from supercruise, resuming.')
+                self.jn.ship_state()['interdicted'] = False  # reset flag
+                return True
             self.set_throttle_0()  # Submit.
             sleep(0.5)
 
@@ -2305,6 +2313,10 @@ class EDAutopilot:
                 self.vce.say("Refueling abort, insufficient scooping")
                 return False
 
+            # Fork RP1: the original loop had no sleep and spun a CPU core flat out for up to FuelScoopTimeOut.
+            # Status.json only updates a few times a second, so polling loses nothing.
+            sleep(0.25)
+
         logger.debug('refuel=refueling')
         self.ap_ckb('log+vce', 'Refueling')
         self.update_ap_status("Refueling")
@@ -2454,7 +2466,13 @@ class EDAutopilot:
         self.set_throttle_100()
 
         # While Mass Locked, keep boosting.
+        # Fork RP1: bounded at 180 s, well beyond leaving a station's mass lock. The original looped forever,
+        # flying in a straight line. Raising stops the assist and shows the user the reason.
+        masslock_timeout = 180
+        start_time = time.time()
         while self.status.get_flag(FlagsFsdMassLocked):
+            if time.time() - start_time > masslock_timeout:
+                raise Exception(f"Still mass locked after {masslock_timeout}s, unable to enter supercruise")
             if boost:
                 self.keys.send('UseBoostJuice')
             sleep(1)
@@ -2466,7 +2484,14 @@ class EDAutopilot:
         self.start_sco_monitoring()
 
         # Wait for jump to supercruise, keep boosting.
-        while not self.status.get_flag(FlagsFsdJump):
+        # Fork RP1: two fixes. (1) Also accept already being in supercruise: polling once a second can miss a
+        # short FsdJump flag, which left the original boosting here forever. (2) Bounded at 45 s in case the FSD
+        # never engages (e.g. mass locked again), instead of waiting forever.
+        engage_timeout = 45
+        start_time = time.time()
+        while not (self.status.get_flag(FlagsFsdJump) or self.status.get_flag(FlagsSupercruise)):
+            if time.time() - start_time > engage_timeout:
+                raise Exception(f"FSD did not engage supercruise within {engage_timeout}s")
             if boost:
                 self.keys.send('UseBoostJuice')
             sleep(1)
@@ -2791,6 +2816,10 @@ class EDAutopilot:
                 self.vce.say("Fighter Destroyed, redeploying")
                 self.afk_combat.launch_fighter()  # assuming two fighter bays
 
+            # Fork RP1: the original loop had no sleep and spun a CPU core flat out for as long as AFK Combat ran,
+            # reading the journal on every pass. The journal updates at most a few times a second.
+            sleep(0.5)
+
         self.vce.say("Terminating AFK Combat Assist")
 
     def dss_assist(self):
@@ -2977,6 +3006,28 @@ class EDAutopilot:
             self.overlay.overlay_quit()
         self.terminate = True
 
+    def _report_assist_error(self, assist_name: str, e: Exception):
+        """ Reports an unexpected error that stopped an assist.
+        Fork RP1: added. The seven handlers in engine_loop logged these at DEBUG level only, so at the default
+        log level an assist simply stopped with no reason given. Now the full traceback goes to autopilot.log,
+        the reason is shown in the GUI log, and it is announced by voice.
+        @param assist_name: Name of the assist that stopped (i.e. 'FSD Assist').
+        @param e: The exception that stopped it.
+        """
+        detail = str(e) or type(e).__name__
+        logger.exception(f"{assist_name} stopped with an error: {detail}")
+
+        # Fork RP1: the error may have landed mid-maneuver with a key held down. The original only released keys
+        # on a user stop, so make sure nothing is left pressed.
+        try:
+            self.keys.release_all_keys()
+        except Exception:
+            logger.exception("Failed to release keys after assist error")
+
+        self.ap_ckb('log', f"{assist_name} stopped: {detail}")
+        if self.vce is not None:
+            self.vce.say(f"{assist_name} stopped with an error")
+
     def engine_loop(self):
         """
         This function will execute in its own thread and will loop forever until the self.terminate flag is set
@@ -3019,9 +3070,8 @@ class EDAutopilot:
                     logger.debug("Caught stop exception")
                     self.keys.release_all_keys()
                 except Exception as e:
-                    logger.debug("FSD Assist trapped generic:"+str(e))
-                    print("Trapped generic:"+str(e))
-                    traceback.print_exc()
+                    # Fork RP1: was logged at DEBUG only (invisible at the default log level), see _report_assist_error.
+                    self._report_assist_error("FSD Assist", e)
 
                 self.stop_sco_monitoring()
                 self.fsd_assist_enabled = False
@@ -3050,9 +3100,8 @@ class EDAutopilot:
                     logger.debug("Caught stop exception")
                     self.keys.release_all_keys()
                 except Exception as e:
-                    print("Trapped generic:"+str(e))
-                    logger.debug("SC Assist trapped generic:"+str(e))
-                    traceback.print_exc()
+                    # Fork RP1: was logged at DEBUG only (invisible at the default log level), see _report_assist_error.
+                    self._report_assist_error("SC Assist", e)
 
                 self.stop_sco_monitoring()
                 logger.debug("Completed sc_assist")
@@ -3075,9 +3124,8 @@ class EDAutopilot:
                     logger.debug("Caught stop exception")
                     self.keys.release_all_keys()
                 except Exception as e:
-                    print("Trapped generic:"+str(e))
-                    logger.debug("Waypoint Assist trapped generic:"+str(e))
-                    traceback.print_exc()
+                    # Fork RP1: was logged at DEBUG only (invisible at the default log level), see _report_assist_error.
+                    self._report_assist_error("Waypoint Assist", e)
 
                 self.stop_sco_monitoring()
                 self.waypoint_assist_enabled = False
@@ -3094,9 +3142,8 @@ class EDAutopilot:
                     logger.debug("Caught stop exception")
                     self.keys.release_all_keys()
                 except Exception as e:
-                    print("Trapped generic:"+str(e))
-                    logger.debug("Robigo Assist trapped generic:"+str(e))
-                    traceback.print_exc()
+                    # Fork RP1: was logged at DEBUG only (invisible at the default log level), see _report_assist_error.
+                    self._report_assist_error("Robigo Assist", e)
 
                 self.stop_sco_monitoring()
                 self.robigo_assist_enabled = False
@@ -3111,9 +3158,8 @@ class EDAutopilot:
                     logger.debug("Stopping afk_combat")
                     self.keys.release_all_keys()
                 except Exception as e:
-                    print("Trapped generic:" + str(e))
-                    logger.debug("AFK Combat Assist trapped generic:" + str(e))
-                    traceback.print_exc()
+                    # Fork RP1: was logged at DEBUG only (invisible at the default log level), see _report_assist_error.
+                    self._report_assist_error("AFK Combat Assist", e)
 
                 self.stop_sco_monitoring()
                 self.afk_combat_assist_enabled = False
@@ -3130,9 +3176,8 @@ class EDAutopilot:
                     logger.debug("Stopping DSS Assist")
                     self.keys.release_all_keys()
                 except Exception as e:
-                    print("Trapped generic:" + str(e))
-                    logger.debug("DSS Assist trapped generic:" + str(e))
-                    traceback.print_exc()
+                    # Fork RP1: was logged at DEBUG only (invisible at the default log level), see _report_assist_error.
+                    self._report_assist_error("DSS Assist", e)
 
                 self.dss_assist_enabled = False
                 self.ap_ckb('dss_stop')
@@ -3146,9 +3191,8 @@ class EDAutopilot:
                     logger.debug("Stopping Single Waypoint Assist")
                     self.keys.release_all_keys()
                 except Exception as e:
-                    print("Trapped generic:" + str(e))
-                    logger.debug("Single Waypoint Assist trapped generic:" + str(e))
-                    traceback.print_exc()
+                    # Fork RP1: was logged at DEBUG only (invisible at the default log level), see _report_assist_error.
+                    self._report_assist_error("Single Waypoint Assist", e)
 
                 self.stop_sco_monitoring()
                 self.single_waypoint_enabled = False

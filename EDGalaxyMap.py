@@ -9,6 +9,13 @@ from StatusParser import StatusParser
 from time import sleep
 from EDlogger import logger
 from pyautogui import typewrite
+import time
+
+# Fork RP1: limits for galaxy map waits that previously had none and could hang an assist forever.
+# How long to wait for the game to plot a route after selecting a system. Long routes can take a while.
+ROUTE_PLOT_TIMEOUT_SEC = 60
+# How many search results to try before giving up on finding the requested system.
+MAX_SEARCH_RESULT_TRIES = 10
 
 
 class EDGalaxyMap:
@@ -108,7 +115,16 @@ class EDGalaxyMap:
         # if got passed through the ship() object, lets call it to see if a target has been
         # selected yet... otherwise we wait.  If long route, it may take a few seconds
         if target_select_cb is not None:
+            # Fork RP1: bounded. The original waited forever if no target was ever selected (route out of range,
+            # permit locked, name not found). Callers already handle a False return.
+            start_time = time.time()
             while not target_select_cb()['target']:
+                if time.time() - start_time > ROUTE_PLOT_TIMEOUT_SEC:
+                    logger.warning(f"Galaxy map: no target selected for '{target_name}' after "
+                                   f"{ROUTE_PLOT_TIMEOUT_SEC}s. Giving up.")
+                    ap.keys.send('GalaxyMapOpen')
+                    sleep(2)
+                    return False
                 sleep(1)
 
         # Close Galaxy map
@@ -161,7 +177,17 @@ class EDGalaxyMap:
         sleep(0.05)
 
         correct_route = False
+        tries = 0
         while not correct_route:
+            # Fork RP1: bounded. The original tried search results forever if the system never matched.
+            tries += 1
+            if tries > MAX_SEARCH_RESULT_TRIES:
+                logger.warning(f"Galaxy map: '{target_name_uc}' not found in the first "
+                               f"{MAX_SEARCH_RESULT_TRIES} search results. Giving up.")
+                ap.keys.send('GalaxyMapOpen')
+                sleep(0.5)
+                return False
+
             # Store the current nav route system
             last_nav_route_sys = ap.nav_route.get_last_system()
             last_nav_route_sys_uc = last_nav_route_sys.upper()
@@ -186,9 +212,21 @@ class EDGalaxyMap:
             # selected yet... otherwise we wait.  If long route, it may take a few seconds
             if ap.nav_route is not None:
                 logger.debug(f"Waiting for Nav Route to update.")
+                start_time = time.time()
                 while 1:
                     curr_nav_route_sys = ap.nav_route.get_last_system()
                     curr_nav_route_sys_uc = curr_nav_route_sys.upper()
+
+                    # Fork RP1: bounded. If the route never changes (plot failed, out of range, permit
+                    # locked, etc.) the original waited here forever.
+                    if (curr_nav_route_sys_uc == last_nav_route_sys_uc
+                            and time.time() - start_time > ROUTE_PLOT_TIMEOUT_SEC):
+                        logger.warning(f"Galaxy map: Nav Route did not change within {ROUTE_PLOT_TIMEOUT_SEC}s "
+                                       f"after selecting '{target_name_uc}'. Giving up.")
+                        ap.keys.send('GalaxyMapOpen')
+                        sleep(0.5)
+                        return False
+
                     # Check if the nav route has been changed (right or wrong)
                     if curr_nav_route_sys_uc != last_nav_route_sys_uc:
                         logger.debug(f"Nav Route dest changed from: {last_nav_route_sys_uc} to: {curr_nav_route_sys_uc}.")
@@ -203,6 +241,10 @@ class EDGalaxyMap:
                             logger.debug(f"Nav Route updated with wrong target: {curr_nav_route_sys_uc}. Select next target.")
                             ap.keys.send('UI_Up')
                             break
+
+                    # Fork RP1: the original loop had no sleep and re-checked NavRoute.json flat out while the
+                    # game plotted the route.
+                    sleep(0.25)
             else:
                 # Cannot check route, so assume right
                 logger.debug(f"Unable to check Nav Route, so assuming it is correct.")
