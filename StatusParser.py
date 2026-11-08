@@ -9,6 +9,7 @@ from time import sleep
 
 from EDAP_data import *
 from EDlogger import logger
+from JsonFile import read_game_json
 from Voice import Voice
 from WindowsKnownPaths import *
 
@@ -204,33 +205,23 @@ class StatusParser:
             }
         }
         """
-        # Check if file changed
-        if self.get_file_modified_time() == self.last_mod_time:
+        # Check if file changed. Capture this BEFORE reading: the game rewrites this file constantly, and
+        # checking afterwards can record a newer write than the data we hold, leaving flags stale. Size is
+        # included because file times only tick every few ms, so time alone can miss a quick rewrite.
+        st = os.stat(self.file_path)
+        mod_time = (st.st_mtime_ns, st.st_size)
+        if mod_time == self.last_mod_time:
             #logger.debug(f'Status.json mod timestamp {self.last_mod_time} unchanged.')
             #print(f'Status.json mod timestamp {self.last_mod_time} unchanged.')
             return self.current_data
 
-        # Read file
-        attempt = 1
-        backoff = 0.1
-        while True:
-            if os.access(self.file_path, os.R_OK):
-                try:
-                    with open(self.file_path, 'r', encoding='utf-8') as file:
-                        data = json.load(file)
-                        if attempt > 2:
-                            logger.debug(f'Status.json read succeeded on attempt {attempt}.')
-                        break
-                except Exception as e:
-                    if attempt >= 2:
-                        logger.debug(f'An error occurred reading Status.json file (attempt {attempt}). File may be open.')
-                    sleep(backoff)
-                    backoff = min(backoff * 2, 1.0)
-                    attempt += 1
-            else:
-                sleep(backoff)
-                backoff = min(backoff * 2, 1.0)
-                attempt += 1
+        # Read file (bounded retries; the game may be part way through writing it)
+        data = read_game_json(self.file_path, 'Status.json')
+        if data is None:
+            if self.current_data is None:
+                raise RuntimeError(f"Unable to read Status.json at '{self.file_path}'. Is Elite Dangerous running?")
+            # Keep the last good data. last_mod_time is unchanged, so the next call retries.
+            return self.current_data
 
         # Combine flags from Flags and Flags2 into a single dictionary
         # combined_flags = {**self.translate_flags(data['Flags'])}
@@ -304,7 +295,7 @@ class StatusParser:
         # Store data
         self.last_data = self.current_data
         self.current_data = cleaned_data
-        self.last_mod_time = self.get_file_modified_time()
+        self.last_mod_time = mod_time
         # logger.debug(f'Status.json mod timestamp {self.last_mod_time} updated.')
         # print(f'Status.json mod timestamp {self.last_mod_time} updated.')
         # print(json.dumps(data, indent=4))

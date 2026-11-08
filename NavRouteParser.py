@@ -6,6 +6,7 @@ import time
 from sys import platform
 from time import sleep
 from EDlogger import logger
+from JsonFile import read_game_json
 
 
 class NavRouteParser:
@@ -75,27 +76,22 @@ class NavRouteParser:
         if not os.path.exists(self.file_path):
             return None
 
-        # Check if file changed
-        if self.get_file_modified_time() == self.last_mod_time:
+        # Check if file changed. Capture the time BEFORE reading so a write that lands while we read is
+        # picked up on the next call rather than masked.
+        mod_time = self.get_file_modified_time()
+        if mod_time == self.last_mod_time:
             #logger.debug(f'NavRoute.json mod timestamp {self.last_mod_time} unchanged.')
             return self.current_data
 
-        # Read file
-        backoff = 1
-        while True:
-            try:
-                with open(self.file_path, 'r', encoding='utf-8') as file:
-                    data = json.load(file)
-                    break
-            except Exception as e:
-                logger.debug('An error occurred reading NavRoute.json file. File may be open.')
-                sleep(backoff)
-                logger.debug('Attempting to re-read NavRoute.json file after delay.')
-                backoff *= 2
+        # Read file (bounded retries; the game may be part way through writing it)
+        data = read_game_json(self.file_path, 'NavRoute.json')
+        if data is None:
+            # Keep the last good data. last_mod_time is unchanged, so the next call retries.
+            return self.current_data
 
         # Store data
         self.current_data = data
-        self.last_mod_time = self.get_file_modified_time()
+        self.last_mod_time = mod_time
         #logger.debug(f'NavRoute.json mod timestamp {self.last_mod_time} updated.')
         # print(json.dumps(data, indent=4))
         return data
