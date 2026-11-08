@@ -1,4 +1,5 @@
 from __future__ import annotations
+import ctypes
 import time
 import typing
 from copy import copy
@@ -48,6 +49,15 @@ def is_elite_foreground() -> bool:
     return handle != 0 and win32gui.GetForegroundWindow() == handle
 
 
+def _is_hung_window(window: int) -> bool:
+    """ True if Windows considers the window hung ('Not Responding'). Fork RP2: added for set_focus_elite_window.
+    Returns False if the check itself fails, so focusing still gets attempted. """
+    try:
+        return bool(ctypes.windll.user32.IsHungAppWindow(window))
+    except Exception:
+        return False
+
+
 def set_focus_elite_window() -> bool:
     """ set focus to the ED window, if ED does not have focus then the keystrokes will go to the window
     that does have focus.
@@ -84,10 +94,16 @@ def set_focus_elite_window() -> bool:
     foreground_thread = win32process.GetWindowThreadProcessId(foreground)[0] if foreground else 0
     attached = False
     try:
-        if foreground_thread and foreground_thread != our_thread:
+        # Not if that window is hung ('Not Responding'): attaching to its input can stall the autopilot thread.
+        if foreground_thread and foreground_thread != our_thread and not _is_hung_window(foreground):
             win32process.AttachThreadInput(our_thread, foreground_thread, True)
             attached = True
-        win32gui.BringWindowToTop(handle)
+        # Separate tries: pywin32 raises when BringWindowToTop fails, which would skip SetForegroundWindow,
+        # the call that matters.
+        try:
+            win32gui.BringWindowToTop(handle)
+        except Exception as e:
+            logger.debug(f"set_focus_elite_window: BringWindowToTop failed: {e}")
         win32gui.SetForegroundWindow(handle)
     except Exception as e:
         logger.debug(f"set_focus_elite_window: fallback failed: {e}")

@@ -6,7 +6,10 @@ REM
 REM Fork RP2: only uses Python 3.11 to 3.13 (3.11 preferred). The original tried 3.10 and 3.9, which can't
 REM install the pinned requirements (pandas, scipy, contourpy and networkx are 3.11+ only), and it reported
 REM "installation complete" even when pip failed. Now it stops with an error instead.
+REM Exit codes are checked with "if %errorlevel% neq 0" because "if errorlevel 1" misses negative codes
+REM (see start_ed_ap.bat).
 
+setlocal
 cd /d "%~dp0"
 
 echo Installing EDAPGui Requirements...
@@ -30,7 +33,7 @@ exit /b 1
 echo Using %PYTHON_CMD%
 %PYTHON_CMD% -m pip install --upgrade pip
 %PYTHON_CMD% -m pip install -r requirements.txt
-if errorlevel 1 goto install_failed
+if %errorlevel% neq 0 goto install_failed
 
 echo.
 echo Requirements installation complete!
@@ -48,6 +51,6 @@ exit /b 1
 REM ---- Sets PYTHON_CMD to the given command if it runs Python 3.11 to 3.13 ----
 :try_python
 %* -c "import sys; sys.exit(0 if (3, 11) <= sys.version_info[:2] <= (3, 13) else 1)" >nul 2>&1
-if errorlevel 1 exit /b 0
+if %errorlevel% neq 0 exit /b 0
 set "PYTHON_CMD=%*"
 exit /b 0

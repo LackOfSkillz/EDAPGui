@@ -125,6 +125,7 @@ class FocusGuardTests(unittest.TestCase):
         keys.gui_messages = []
         keys.ap_ckb = lambda msg, body=None: keys.gui_messages.append(body)
         keys._focus_msg_times = {}
+        keys._focus_failed_at = float('-inf')
         keys.key_mod_delay = 0
         keys.key_def_hold_time = 0
         keys.key_repeat_delay = 0
@@ -193,21 +194,61 @@ class FocusGuardTests(unittest.TestCase):
         self.assertEqual(calls['set_focus'], 0)
         self.assertEqual(keys.gui_messages, [], "should only go to the log file, not the GUI")
 
+    def test_after_a_failure_later_keys_try_once_until_focus_is_back(self):
+        """ Review fix: with focus unrecoverable (e.g. an elevated window), every key cost a full second. """
+        keys = self.make_keys()
+        results = []
+        calls = self.patch_windows(foreground=False, focus_results=results)
+        self.assertFalse(keys.ensure_focus())
+        self.assertGreater(calls['set_focus'], 1, "first failure should retry")
+
+        calls['set_focus'] = 0
+        start = time.time()
+        self.assertFalse(keys.ensure_focus())
+        self.assertEqual(calls['set_focus'], 1)
+        self.assertLess(time.time() - start, 0.1)
+
+        results.append(True)  # focus comes back: full retries resume afterwards
+        self.assertTrue(keys.ensure_focus())
+        calls['set_focus'] = 0
+        self.assertFalse(keys.ensure_focus())
+        self.assertGreater(calls['set_focus'], 1)
+
+    def test_no_retry_makes_one_attempt(self):
+        keys = self.make_keys()
+        calls = self.patch_windows(foreground=False, focus_results=[])
+        start = time.time()
+        self.assertFalse(keys.ensure_focus(retry=False))
+        self.assertEqual(calls['set_focus'], 1)
+        self.assertLess(time.time() - start, 0.1)
+
+    def test_works_without_a_gui_callback(self):
+        """ Review fix: EDKeys(cb=None), as in EDWayPoint's test main, raised TypeError from send(). """
+        keys = self.make_keys()
+        keys.ap_ckb = None
+        self.patch_windows(foreground=False, focus_results=[True])
+        self.assertTrue(keys.ensure_focus())
+
     def test_send_checks_focus_before_press_and_before_release(self):
-        """ A window can take focus while a key is held; the release must reach Elite too. """
+        """ A window can take focus while a key is held; the release must reach Elite too. Before a release
+        only one attempt is made, so the key isn't held (and the ship turning) longer while retrying. """
         keys = self.make_keys()
         events = []
-        keys.ensure_focus = lambda: events.append('focus') or True
+        keys.ensure_focus = lambda retry=True: events.append('focus' if retry else 'focus-once') or True
         with mock.patch.object(edkeys_module, 'PressKey', lambda k: events.append('press')), \
                 mock.patch.object(edkeys_module, 'ReleaseKey', lambda k: events.append('release')):
             keys.send('TestKey')
-            self.assertEqual(events, ['focus', 'press', 'focus', 'release'])
+            self.assertEqual(events, ['focus', 'press', 'focus-once', 'release'])
             events.clear()
             keys.send('TestKey', state=1)
             self.assertEqual(events, ['focus', 'press'])
             events.clear()
             keys.send('TestKey', state=0)
-            self.assertEqual(events, ['focus', 'release'])
+            self.assertEqual(events, ['focus-once', 'release'])
+            events.clear()
+            keys.send_key('Down', 0x11)
+            keys.send_key('Up', 0x11)
+            self.assertEqual(events, ['focus', 'press', 'focus-once', 'release'])
 
 
 if __name__ == '__main__':

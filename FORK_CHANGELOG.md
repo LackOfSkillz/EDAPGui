@@ -40,9 +40,10 @@ Bug fixes plus one deliberate behaviour change: the autopilot now keeps its keys
   - Before every key press and release, EDAP checks that Elite has focus. This costs almost nothing when it does.
   - If it doesn't, EDAP takes focus back. A GUI log line names the window that took it, at most once every 10 seconds.
   - The autopilot never pauses or stops for this. If Elite can't be brought forward within 1 second, the key is sent anyway and a warning is logged.
-  - The release of a held key is checked too, so a window popping up mid-hold can't leave Elite thinking the key is still down.
-- **Fixed:** bringing Elite forward was unreliable. Windows often refuses a background program's request to change focus, and the original hid that failure. There's now a standard fallback for that case. It also no longer calls `ShowWindow(SW_NORMAL)` every time, which could resize the game window; it only restores a minimised window.
-- Galaxy map system names are now typed one character at a time with the focus check, so a pop-up can't receive half a system name.
+  - After such a failure (say, an admin window Windows won't let EDAP cover), later keys make one quick attempt each instead of waiting a second each, until Elite has focus again.
+  - The release of a held key is checked too, so a window popping up mid-hold can't leave Elite thinking the key is still down. That check makes one quick attempt only, so a held key (and the turn it drives) isn't stretched by up to a second while retrying.
+- **Fixed:** bringing Elite forward was unreliable. Windows often refuses a background program's request to change focus, and the original hid that failure. There's now a standard fallback for that case. The fallback skips a window that is "Not Responding", since attaching to it can stall the autopilot. It also no longer calls `ShowWindow(SW_NORMAL)` every time, which could resize the game window; it only restores a minimised window.
+- Galaxy map system names are now typed one character at a time with the focus check, so a pop-up can't receive half a system name. Same 0.25 s between characters as before.
 - The "Activate Elite for each key" option is now redundant. It is shown greyed out as "Keep Elite focused (now automatic)" and kept in config files so they still load.
 
 ### Install and launch (`start_ed_ap.bat`, `install_requirements.bat`, `readme.md`, `requirements.txt`, `.gitattributes`)
@@ -51,9 +52,11 @@ Bug fixes plus one deliberate behaviour change: the autopilot now keeps its keys
   - The Python version checks never saw real results; it always tried `py -3.11`.
   - A failed requirements install still reported success and launched.
   - The script is now flat, so every check sees the real result.
+  - Exit codes are checked with `if %errorlevel% neq 0`, not `if errorlevel 1`. The latter means "1 or more" and misses negative codes: the newer `py.exe` launcher returns one when the requested Python version isn't installed, and so does a crash.
+  - A failed `venv` creation (for example, EDAP still running and holding files open) now stops with a message instead of carrying on.
 - **Fixed: a failed install stuck forever.** Setup counted as done once the `venv` folder existed, so every launch after a failed install skipped setup and started a broken environment. Setup now only counts as done once the requirements install successfully.
   - An existing venv on a supported Python is reused: pip is simply run again, which takes seconds when everything is installed.
-  - A venv on an unsupported Python is rebuilt.
+  - A venv on an unsupported Python, or one whose pip doesn't work, is rebuilt.
 - **Fixed: unsupported Python versions.** The launcher, installer and readme offered Python 3.9 and 3.10, but the pinned requirements can't install on them. Resolving the requirements for Windows per version showed:
   - 3.9 and 3.10 fail: pandas 3.0.3, scipy 1.17.1, contourpy 1.3.3 and networkx 3.6.1 are 3.11+ only.
   - 3.14 fails: PaddlePaddle 3.2.2 has no 3.14 build.
@@ -65,7 +68,7 @@ Bug fixes plus one deliberate behaviour change: the autopilot now keeps its keys
 
 ### Tests and CI (`test/offline/`, `.github/workflows/offline-tests.yml`)
 
-- **Added:** 28 offline tests covering pass 1 and pass 2. They need neither the game nor Windows: Windows-only modules are replaced with stand-ins, and the focus guard is tested with simulated window changes.
+- **Added:** 39 offline tests covering pass 1 and pass 2. They need neither the game nor Windows: Windows-only modules are replaced with stand-ins. The focus guard and the real `Screen.py` focus code are tested against simulated Windows calls, including Windows refusing the focus change.
 - **Added:** a GitHub Actions workflow that runs on every push and pull request, on Windows, with Python 3.11, 3.12 and 3.13:
   - compiles every file with warnings treated as errors,
   - lints for real bugs (syntax errors, undefined names),
@@ -78,6 +81,7 @@ Bug fixes plus one deliberate behaviour change: the autopilot now keeps its keys
 | Situation | Before | Now |
 |---|---|---|
 | A pop-up or alt-tab takes focus during a run | Autopilot keys go into that window and Elite misses them | Elite is brought back before the next key; GUI log names the window |
+| Elite can't be brought back (e.g. an admin window has focus) | Keys go into that window | Same, plus a GUI warning every 10 s; no extra delay per key after the first second |
 | You're typing in another window during a run | The autopilot types into your window | Elite takes focus back at its next keypress, so your typing may then go to Elite |
 | OCR fails while approaching a station | Disengage detection could die, so SC Assist overshoots | Logged; detection carries on |
 | A config file is unreadable at startup | Silently replaced with defaults | Kept as `<name>.unreadable-<date-time>`, defaults used, warning in GUI log |
@@ -88,15 +92,23 @@ Bug fixes plus one deliberate behaviour change: the autopilot now keeps its keys
 
 ### Testing
 
-- 28 offline tests pass, with no unclosed-file warnings.
+- 39 offline tests pass, with no unclosed-file warnings.
 - The whole repo compiles with warnings as errors and passes the bug lint.
-- Checked against the real tools: OpenCV's behaviour for the error-path file name, and pip's resolution of the pinned requirements on Windows for Python 3.9 through 3.14.
-- The batch files and the Windows focus code were also desk-reviewed independently, since they can't run here.
+- Checked against the real tools: OpenCV's behaviour for the error-path file name, pip's resolution of the pinned requirements on Windows for Python 3.9 through 3.14, and pyautogui 0.9.54's source for the typing pause.
+- The batch files and the Windows focus code were also desk-reviewed independently, since they can't run here. The review found, and this entry includes fixes for:
+  - `if errorlevel 1` missing negative exit codes (a missing Python version could pass the version check, and a crashed pip could count as a successful install),
+  - an unchecked `venv` creation, and a venv with broken pip being reused forever,
+  - `BringWindowToTop` raising and skipping the `SetForegroundWindow` after it,
+  - galaxy map typing being 0.35 s per character instead of 0.25 s (pyautogui adds its own pause),
+  - a second of delay per key while focus couldn't be regained, and up to a second of extra hold before a key release,
+  - wall-clock timing in the focus retry, and a crash when EDKeys has no GUI callback.
+  - The new `Screen.py` tests fail on the code from before these fixes.
 - **Not yet tested on Windows or in game.** Before merging:
   - [ ] Fresh "Download ZIP" install with Python 3.11 via `start_ed_ap.bat`
   - [ ] Launch with your existing `venv`: pip runs briefly, then EDAP starts
   - [ ] During an FSD route, alt-tab to another window: Elite comes back at the next key, and the GUI log names the window
   - [ ] Supercruise Assist to a station: drops at the disengage prompt
+  - [ ] A route that types a system name into the galaxy map: the name is typed correctly
   - [ ] Settings tab: "Keep Elite focused (now automatic)" is greyed out
   - [ ] Enable Actions on the fork and check the "Offline tests" workflow passes
 

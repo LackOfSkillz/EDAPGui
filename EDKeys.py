@@ -26,6 +26,9 @@ Constraints:  This file will use the latest modified *.binds file
 # Fork RP2: focus guard settings (see EDKeys.ensure_focus).
 FOCUS_RETRY_SEC = 1.0  # How long to keep trying to bring Elite back in front before sending anyway.
 FOCUS_LOG_INTERVAL_SEC = 10.0  # Minimum time between repeats of the same focus message, to avoid log spam.
+# After a failed attempt to take focus back (e.g. an elevated window that Windows won't let us cover), later keys
+# make one quick attempt each instead of retrying for FOCUS_RETRY_SEC, so each key isn't delayed by a second.
+FOCUS_BACKOFF_SEC = 10.0
 
 
 @final
@@ -40,6 +43,7 @@ class EDKeys:
         # acts when Elite has lost focus. Kept so the existing 'ActivateEliteEachKey' setting and tests still work.
         self.activate_window = False
         self._focus_msg_times: dict[str, float] = {}  # Fork RP2: rate limiting for focus messages
+        self._focus_failed_at = float('-inf')  # Fork RP2: when focus last couldn't be taken back (FOCUS_BACKOFF_SEC)
 
         self.keys_to_obtain = [
             'YawLeftButton',
@@ -265,16 +269,17 @@ class EDKeys:
         return latest_bindings
 
     def _focus_message(self, kind: str, msg: str, to_gui: bool):
-        """ Logs a focus message, at most once per FOCUS_LOG_INTERVAL_SEC for each kind. Fork RP2: added. """
-        now = time.time()
-        if now - self._focus_msg_times.get(kind, 0.0) < FOCUS_LOG_INTERVAL_SEC:
+        """ Logs a focus message, at most once per FOCUS_LOG_INTERVAL_SEC for each kind. Fork RP2: added.
+        Uses time.monotonic(): wall-clock time can jump back (a clock sync), which would mute messages. """
+        now = time.monotonic()
+        if now - self._focus_msg_times.get(kind, float('-inf')) < FOCUS_LOG_INTERVAL_SEC:
             return
         self._focus_msg_times[kind] = now
         logger.warning(msg)
-        if to_gui:
+        if to_gui and self.ap_ckb:  # no callback when EDKeys is used on its own (e.g. EDWayPoint's test main)
             self.ap_ckb('log', msg)
 
-    def ensure_focus(self) -> bool:
+    def ensure_focus(self, retry: bool = True) -> bool:
         """ Makes sure Elite is the focused window before a key is sent, taking focus back if another window
         (a notification, a dialog, an alt-tab) has taken it. Never pauses or stops the autopilot.
         Fork RP2: added. Windows delivers simulated keys only to the focused window, so when something else
@@ -282,6 +287,8 @@ class EDKeys:
         progress. The old 'Activate Elite each key' option refocused before every key, even when Elite already
         had focus, and was off by default. This check costs almost nothing when Elite has focus, and acts
         only when it doesn't.
+        @param retry: keep trying for up to FOCUS_RETRY_SEC. False makes one attempt only; used before releasing
+        a held key, so the key isn't held longer than intended while retrying.
         @return: True if Elite has focus. False if it couldn't be focused; the key is then sent anyway, as
         before, so the autopilot keeps going.
         """
@@ -299,26 +306,33 @@ class EDKeys:
         except Exception:
             thief = 'another window'
 
-        deadline = time.time() + FOCUS_RETRY_SEC
+        # One attempt only if asked, or if focus couldn't be taken back recently (see FOCUS_BACKOFF_SEC).
+        # time.monotonic(), not time.time(): a clock that jumps back would otherwise stretch the retry loop.
+        now = time.monotonic()
+        keep_trying = retry and now - self._focus_failed_at >= FOCUS_BACKOFF_SEC
+        deadline = now + FOCUS_RETRY_SEC if keep_trying else now
         while True:
             if set_focus_elite_window():
+                self._focus_failed_at = float('-inf')
                 # Give the game a moment to start taking input again before the key arrives.
                 sleep(0.05)
                 self._focus_message('regained', f"Elite lost focus to '{thief}'. Took focus back so the "
                                                 f"autopilot's keys go to Elite.", to_gui=True)
                 return True
-            if time.time() >= deadline:
+            if time.monotonic() >= deadline:
                 break
             sleep(0.1)
 
+        self._focus_failed_at = time.monotonic()
         self._focus_message('failed', f"Could not bring Elite back in front of '{thief}'. Keys may go to "
                                       f"that window until Elite has focus again.", to_gui=True)
         return False
 
     def send_key(self, type, key):
         # Fork RP2: always make sure Elite has focus (see ensure_focus). Was only done when the
-        # 'Activate Elite each key' option was on, which it is not by default.
-        self.ensure_focus()
+        # 'Activate Elite each key' option was on, which it is not by default. A release makes one attempt only,
+        # so the key isn't held longer than intended (see ensure_focus).
+        self.ensure_focus(retry=(type != 'Up'))
 
         if type == 'Up':
             ReleaseKey(key)
@@ -350,8 +364,9 @@ class EDKeys:
 
         for i in range(repeat):
             # Fork RP2: always make sure Elite has focus (see ensure_focus). Was only done when the
-            # 'Activate Elite each key' option was on, which it is not by default.
-            self.ensure_focus()
+            # 'Activate Elite each key' option was on, which it is not by default. Releasing a held key
+            # (state 0) makes one attempt only, so the key isn't held longer than intended.
+            self.ensure_focus(retry=(state != 0))
 
             if state is None or state == 1:
                 for mod in key['mods']:
@@ -373,8 +388,9 @@ class EDKeys:
 
             if state is None:
                 # Fork RP2: focus can be taken while the key is held down. Check again so the release
-                # reaches Elite; otherwise Elite could be left thinking the key is still held.
-                self.ensure_focus()
+                # reaches Elite; otherwise Elite could be left thinking the key is still held. One attempt
+                # only: retrying here would keep the key held down (and the ship turning) for up to a second.
+                self.ensure_focus(retry=False)
 
             if state is None or state == 0:
                 ReleaseKey(key['key'])
