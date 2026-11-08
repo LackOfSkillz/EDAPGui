@@ -6,6 +6,7 @@ from tkinter import ttk, messagebox
 import json
 import os
 
+from JsonFile import write_json_atomic
 from Screen_Regions import Quad, load_default_calib_data, MyRegion
 
 
@@ -197,8 +198,9 @@ class Calibration:
         # self.ocr_calibration_data['EDStationServicesInShip.connected_to']['rect'] = q.to_rect_list(round_dp=4)
 
         calibration_file = 'configs/ocr_calibration.json'
-        with open(calibration_file, 'w') as f:
-            json.dump(self.ocr_calibration_data, f, indent=4)
+        # Fork RP2: atomic write, so a crash mid-save can't leave a truncated calibration file, which made
+        # every screen that loads calibration fail on the next start.
+        write_json_atomic(self.ocr_calibration_data, calibration_file)
         # self.log_msg("OCR calibration data saved.")
         self.ap_ckb('log', f"OCR calibration data saved.")
         # messagebox.showinfo("Saved", "OCR calibration data saved.\nPlease restart the application for changes to take effect.")

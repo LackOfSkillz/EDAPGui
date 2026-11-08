@@ -4,6 +4,7 @@ import json
 from os import environ, listdir
 import os
 from os.path import getmtime, isfile, join
+import time
 from time import sleep
 from typing import Any, final
 from xml.etree.ElementTree import parse
@@ -11,7 +12,7 @@ from xml.etree.ElementTree import parse
 import win32gui
 import xmltodict
 
-from Screen import set_focus_elite_window
+from Screen import set_focus_elite_window, is_elite_foreground, get_elite_window_handle
 from directinput import *
 from EDlogger import logger
 
@@ -22,6 +23,10 @@ Description:  Pulls the keybindings for specific controls from the ED Key Bindin
 Constraints:  This file will use the latest modified *.binds file
 """
 
+# Fork RP2: focus guard settings (see EDKeys.ensure_focus).
+FOCUS_RETRY_SEC = 1.0  # How long to keep trying to bring Elite back in front before sending anyway.
+FOCUS_LOG_INTERVAL_SEC = 10.0  # Minimum time between repeats of the same focus message, to avoid log spam.
+
 
 @final
 class EDKeys:
@@ -31,7 +36,10 @@ class EDKeys:
         self.key_mod_delay = 0.01  # Delay for key modifiers to ensure modifier is detected before/after the key
         self.key_def_hold_time = 0.2  # Default hold time for a key press
         self.key_repeat_delay = 0.1  # Delay between key press repeats
+        # Fork RP2: no longer used by send()/send_key(). The focus guard (ensure_focus) now always runs and only
+        # acts when Elite has lost focus. Kept so the existing 'ActivateEliteEachKey' setting and tests still work.
         self.activate_window = False
+        self._focus_msg_times: dict[str, float] = {}  # Fork RP2: rate limiting for focus messages
 
         self.keys_to_obtain = [
             'YawLeftButton',
@@ -240,7 +248,10 @@ class EDKeys:
 
     # Note:  this routine will grab the *.binds file which is the latest modified
     def get_latest_keybinds(self):
-        path_bindings = environ['LOCALAPPDATA'] + "\Frontier Developments\Elite Dangerous\Options\Bindings"
+        # Fork RP2: built with join(). The original concatenated "\Frontier Developments\...", whose "\F" is
+        # an invalid escape sequence (a SyntaxWarning since Python 3.12).
+        path_bindings = join(environ['LOCALAPPDATA'], "Frontier Developments", "Elite Dangerous", "Options",
+                             "Bindings")
         try:
             list_of_bindings = [join(path_bindings, f) for f in listdir(path_bindings) if
                                 isfile(join(path_bindings, f)) and f.endswith('.binds')]
@@ -253,11 +264,61 @@ class EDKeys:
         logger.info(f'Latest keybindings file:{latest_bindings}')
         return latest_bindings
 
+    def _focus_message(self, kind: str, msg: str, to_gui: bool):
+        """ Logs a focus message, at most once per FOCUS_LOG_INTERVAL_SEC for each kind. Fork RP2: added. """
+        now = time.time()
+        if now - self._focus_msg_times.get(kind, 0.0) < FOCUS_LOG_INTERVAL_SEC:
+            return
+        self._focus_msg_times[kind] = now
+        logger.warning(msg)
+        if to_gui:
+            self.ap_ckb('log', msg)
+
+    def ensure_focus(self) -> bool:
+        """ Makes sure Elite is the focused window before a key is sent, taking focus back if another window
+        (a notification, a dialog, an alt-tab) has taken it. Never pauses or stops the autopilot.
+        Fork RP2: added. Windows delivers simulated keys only to the focused window, so when something else
+        took focus, EDAP's keys went into that window and Elite missed them, breaking the maneuver in
+        progress. The old 'Activate Elite each key' option refocused before every key, even when Elite already
+        had focus, and was off by default. This check costs almost nothing when Elite has focus, and acts
+        only when it doesn't.
+        @return: True if Elite has focus. False if it couldn't be focused; the key is then sent anyway, as
+        before, so the autopilot keeps going.
+        """
+        if is_elite_foreground():
+            return True
+
+        if get_elite_window_handle() == 0:
+            # Game window not found (not running, or a test without the game): nothing to focus.
+            self._focus_message('no_window', "Elite Dangerous window not found. Keys go to whichever window "
+                                             "has focus.", to_gui=False)
+            return False
+
+        try:
+            thief = win32gui.GetWindowText(win32gui.GetForegroundWindow()) or 'another window'
+        except Exception:
+            thief = 'another window'
+
+        deadline = time.time() + FOCUS_RETRY_SEC
+        while True:
+            if set_focus_elite_window():
+                # Give the game a moment to start taking input again before the key arrives.
+                sleep(0.05)
+                self._focus_message('regained', f"Elite lost focus to '{thief}'. Took focus back so the "
+                                                f"autopilot's keys go to Elite.", to_gui=True)
+                return True
+            if time.time() >= deadline:
+                break
+            sleep(0.1)
+
+        self._focus_message('failed', f"Could not bring Elite back in front of '{thief}'. Keys may go to "
+                                      f"that window until Elite has focus again.", to_gui=True)
+        return False
+
     def send_key(self, type, key):
-        # Focus Elite window if configured
-        if self.activate_window:
-            set_focus_elite_window()
-            sleep(0.05)
+        # Fork RP2: always make sure Elite has focus (see ensure_focus). Was only done when the
+        # 'Activate Elite each key' option was on, which it is not by default.
+        self.ensure_focus()
 
         if type == 'Up':
             ReleaseKey(key)
@@ -288,10 +349,9 @@ class EDKeys:
             repeat) + ',repeat_delay:' + str(repeat_delay) + ',state:' + str(state))
 
         for i in range(repeat):
-            # Focus Elite window if configured.
-            if self.activate_window:
-                set_focus_elite_window()
-                sleep(0.05)
+            # Fork RP2: always make sure Elite has focus (see ensure_focus). Was only done when the
+            # 'Activate Elite each key' option was on, which it is not by default.
+            self.ensure_focus()
 
             if state is None or state == 1:
                 for mod in key['mods']:
@@ -310,6 +370,11 @@ class EDKeys:
 
             if 'hold' in key:
                 sleep(0.1)
+
+            if state is None:
+                # Fork RP2: focus can be taken while the key is held down. Check again so the release
+                # reaches Elite; otherwise Elite could be left thinking the key is still held.
+                self.ensure_focus()
 
             if state is None or state == 0:
                 ReleaseKey(key['key'])

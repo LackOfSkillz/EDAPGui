@@ -1,4 +1,6 @@
 from __future__ import annotations
+import os
+import re
 import time
 import cv2
 import numpy as np
@@ -18,6 +20,9 @@ Description:
 
 Author: Stumpii
 """
+
+# Fork RP2: folder for images that OCR failed on. Nothing created it before, so saves always failed.
+OCR_OUTPUT_DIR = './ocr_output'
 
 
 class OCR:
@@ -46,6 +51,26 @@ class OCR:
         self.jarowinkler = JaroWinkler()
         self.sorensendice = SorensenDice()
         self.normalized_levenshtein = NormalizedLevenshtein()
+
+    @staticmethod
+    def _save_failed_image(image, name: str):
+        """ Saves the image OCR failed on, for debugging. Never raises.
+        Fork RP2: added. The error handlers used to call cv2.imwrite(f"./ocr_output/{name}") directly. Names
+        like 'disengage' or '' have no file extension, so OpenCV raised ("could not find a writer"), and the
+        folder was never created. The handler meant to recover from an OCR failure therefore raised itself.
+        For supercruise disengage detection that killed the monitor thread, so SC Assist never saw the
+        disengage prompt. Now: .png extension, folder created, timestamped so failures don't overwrite each
+        other, and any error is logged instead of raised. """
+        try:
+            os.makedirs(OCR_OUTPUT_DIR, exist_ok=True)
+            safe_name = re.sub(r'[^A-Za-z0-9_-]+', '_', name) or 'ocr'
+            path = os.path.join(OCR_OUTPUT_DIR, f"failed-{safe_name}-{time.strftime('%Y%m%d-%H%M%S')}.png")
+            if cv2.imwrite(path, image):
+                logger.error(f"OCR input image stored to {path}.")
+            else:
+                logger.warning(f"Could not store OCR input image to {path}.")
+        except Exception as e:
+            logger.warning(f"Could not store OCR input image: {e}")
 
     def _reinit_paddleocr(self):
         """ Reinitialize PaddleOCR after a failure. PaddleOCR's C++ layer can throw
@@ -147,8 +172,7 @@ class OCR:
             logger.error(f"OCR failed: {e}")
             # Reinit to avoid hard crash on next call due to corrupted C++ state
             self._reinit_paddleocr()
-            logger.error(f"Image stored to ocr_output folder.")
-            cv2.imwrite(f"./ocr_output/{name}", image)
+            self._save_failed_image(image, name)  # Fork RP2: was a direct imwrite that could raise, see helper
             return None, None
 
     def image_simple_ocr(self, image, name='') -> list[str] | None:
@@ -203,8 +227,7 @@ class OCR:
             logger.error(f"OCR failed: {e}")
             # Reinit to avoid hard crash on next call due to corrupted C++ state
             self._reinit_paddleocr()
-            logger.error(f"Image stored to ocr_output folder.")
-            cv2.imwrite(f"./ocr_output/{name}", image)
+            self._save_failed_image(image, name)  # Fork RP2: was a direct imwrite that could raise, see helper
             return None
 
     def get_highlighted_item_data(self, image, item: Quad, name=''):

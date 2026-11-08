@@ -12,6 +12,7 @@ from datetime import datetime
 
 from EDAP_data import ship_size_map, ship_name_map
 from EDlogger import logger
+from JsonFile import write_json_atomic
 from WindowsKnownPaths import *
 
 """
@@ -760,9 +761,9 @@ def write_construction(data, filename='./configs/construction.json'):
     if data is None:
         return False
     try:
-        with open(filename, "w") as fp:
-            json.dump(data, fp, indent=4)
-            return True
+        # Fork RP2: atomic write, so a crash mid-save can't leave a truncated construction.json.
+        write_json_atomic(data, filename)
+        return True
     except Exception as e:
         logger.warning("EDJournal.py write_construction error:" + str(e))
         return False
