@@ -1,0 +1,5 @@
+# Fork RP2: batch files must use Windows (CRLF) line endings. They were stored with Unix (LF) endings, and
+# "Download ZIP" (the readme's recommended install method) delivered them that way. cmd.exe can fail to
+# find "goto" labels in LF-only batch files. Git and GitHub's ZIP download apply this on checkout.
+*.bat text eol=crlf
+*.cmd text eol=crlf
