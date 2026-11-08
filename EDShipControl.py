@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TypedDict
 
 from EDAP_data import *
+from EDlogger import logger
 from RPYLineEditor import convert_curve_to_float, convert_curve_to_str, closest_angle
 from Screen import set_focus_elite_window
 from StatusParser import StatusParser
@@ -136,18 +137,26 @@ class EDShipControl:
 
         return None
 
-    def goto_cockpit_view(self) -> bool:
+    def goto_cockpit_view(self, max_presses: int = 10) -> bool:
         """ Goto cockpit view.
-        @return: True once complete.
+        @param max_presses: Maximum number of UI_Back presses before giving up.
+        @return: True once in cockpit view, False if still in a panel after max_presses.
         """
         if self.status_parser.get_gui_focus() == GuiFocusNoFocus:
             return True
 
-        # Go down to cockpit view
-        while not self.status_parser.get_gui_focus() == GuiFocusNoFocus:
+        # Go down to cockpit view. Bounded so a panel that won't close (or a missing
+        # UI_Back binding) can't trap us here forever spamming keys.
+        for _ in range(max_presses):
             self.keys.send("UI_Back")  # make sure back in cockpit view
+            # Give the game a moment to update Status.json before checking again.
+            sleep(0.2)
+            if self.status_parser.get_gui_focus() == GuiFocusNoFocus:
+                return True
 
-        return True
+        logger.warning(f"goto_cockpit_view: still not in cockpit view after {max_presses} UI_Back presses "
+                       f"(GuiFocus={self.status_parser.get_gui_focus()}).")
+        return False
 
     def roll_clockwise_anticlockwise(self, deg: float, auto_tune: bool = False, cur_deg: float = 0.0) -> (
             CompassTargetOffset | None):
