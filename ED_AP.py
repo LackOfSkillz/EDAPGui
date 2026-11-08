@@ -11,6 +11,7 @@ from typing import TypedDict
 import cv2
 
 from EDAPColonizeEditor import read_json_file, write_json_file
+from JsonFile import backup_unreadable_file
 from EDFSS import EDFSS
 from EDPlayerSettings import EDPlayerSettings
 from MachineLearning import MachLearn, ModelType
@@ -194,6 +195,10 @@ class EDAutopilot:
         self.sunpitchuptime = 0.0
 
         self.ap_ckb = cb
+
+        # Fork RP2: show the warning from load_config() now that the GUI callback exists.
+        if getattr(self, '_unreadable_config_msg', None):
+            self.ap_ckb('log', self._unreadable_config_msg)
 
         self.load_ship_configs()
 
@@ -443,6 +448,13 @@ class EDAutopilot:
             self.config = cnf
             logger.debug("read AP json:" + str(cnf))
         else:
+            # Fork RP2: if AP.json exists but couldn't be read, keep it as a backup before writing defaults.
+            # The original overwrote it, silently losing all the user's settings. The GUI isn't connected yet,
+            # so the message is shown once it is (see __init__).
+            backup = backup_unreadable_file('./configs/AP.json')
+            if backup:
+                self._unreadable_config_msg = (f"WARNING: configs/AP.json could not be read, so default settings are "
+                                               f"in use. Your old file was kept as {backup}.")
             write_json_file(self.config, filepath='./configs/AP.json')
 
     def load_ship_configs(self):
@@ -461,6 +473,12 @@ class EDAutopilot:
             self.ship_configs = shp_cnf
             logger.debug("read Ships Config json:" + str(shp_cnf))
         else:
+            # Fork RP2: if ship_configs.json exists but couldn't be read, keep it as a backup before writing
+            # defaults. The original overwrote it, silently losing every ship's RPY tuning.
+            backup = backup_unreadable_file('./configs/ship_configs.json')
+            if backup:
+                self.ap_ckb('log', f"WARNING: configs/ship_configs.json could not be read, so default ship "
+                                   f"settings are in use. Your old file was kept as {backup}.")
             write_json_file(self.ship_configs, filepath='./configs/ship_configs.json')
 
         # Load ship configuration with proper hierarchy
@@ -1433,51 +1451,26 @@ class EDAutopilot:
     def _sc_sco_active_loop(self):
         """ A loop to determine is Supercruise Overcharge is active.
         This runs on a separate thread monitoring the status in the background. """
+        # Fork RP2: each pass is now wrapped in try/except. This thread had no error handling, so any exception
+        # (e.g. the OCR error-path crash fixed in OCR.py) killed it silently. It is the only thing that detects
+        # the supercruise "disengage" prompt, so SC Assist would fly on past its destination. Now an error is
+        # logged and the next pass runs as normal.
+        error_count = 0
         while self._sc_sco_active_loop_enable:
-            # deactivate if not in SC
-            if not self.status.get_flag(FlagsSupercruise):
-                self.stop_sco_monitoring()
-                break
-
             start_time = time.time()
+            try:
+                # deactivate if not in SC
+                if not self.status.get_flag(FlagsSupercruise):
+                    self.stop_sco_monitoring()
+                    break
 
-            # Try to determine if the disengage/sco text is there
-            sc_sco_is_active_ls = self.sc_sco_is_active
-
-            # Check if SCO active in flags
-            self.sc_sco_is_active = self.status.get_flag2(Flags2FsdScoActive)
-
-            if self.sc_sco_is_active and not sc_sco_is_active_ls:
-                self.ap_ckb('log+vce', "Supercruise Overcharge activated")
-            if sc_sco_is_active_ls and not self.sc_sco_is_active:
-                self.ap_ckb('log+vce', "Supercruise Overcharge deactivated")
-
-            # Protection if SCO is active
-            if self.sc_sco_is_active:
-                if self.status.get_flag(FlagsOverHeating):
-                    logger.info("SCO Aborting, overheating")
-                    self.ap_ckb('log+vce', "SCO Aborting, overheating")
-                    self.keys.send('UseBoostJuice')
-                elif self.status.get_flag(FlagsLowFuel):
-                    logger.info("SCO Aborting, < 25% fuel")
-                    self.ap_ckb('log+vce', "SCO Aborting, < 25% fuel")
-                    self.keys.send('UseBoostJuice')
-                elif self.jn.ship_state()['fuel_percent'] < self.config['FuelThreasholdAbortAP']:
-                    logger.info("SCO Aborting, < users low fuel threshold")
-                    self.ap_ckb('log+vce', "SCO Aborting, < users low fuel threshold")
-                    self.keys.send('UseBoostJuice')
-
-            # Check SC Disengage, but only when not in SC Overcharge
-            if not self.sc_sco_is_active:
-                # Enable one or the other!
-                # self._sc_disengage_active = self.sc_disengage(self.scrReg)
-
-                # if self.sc_disengage_label_up(scr_reg):
-                # If active, latch active flag and let it be reset when out of SC
-                if not self._sc_disengage_active:
-                    self._sc_disengage_active = self.sc_disengage_ocr(self.scrReg)
-            # else:
-            #     self._sc_disengage_active = False
+                self._sc_sco_check_once()
+            except Exception as e:
+                error_count += 1
+                if error_count == 1:
+                    logger.exception(f"SCO/disengage monitor error (monitoring continues): {e}")
+                else:
+                    logger.warning(f"SCO/disengage monitor error #{error_count} (monitoring continues): {e}")
 
             # Sleep upto 1 sec max. If OCR takes > 1 sec, there will be no delay
             elapsed_time = time.time() - start_time
@@ -1486,6 +1479,47 @@ class EDAutopilot:
 
         # Reset disengage latch, in case it was latched.
         self._sc_disengage_active = False
+
+    def _sc_sco_check_once(self):
+        """ One pass of the SCO/disengage monitor.
+        Fork RP2: moved out of _sc_sco_active_loop unchanged, so the loop can guard it with try/except. """
+        # Try to determine if the disengage/sco text is there
+        sc_sco_is_active_ls = self.sc_sco_is_active
+
+        # Check if SCO active in flags
+        self.sc_sco_is_active = self.status.get_flag2(Flags2FsdScoActive)
+
+        if self.sc_sco_is_active and not sc_sco_is_active_ls:
+            self.ap_ckb('log+vce', "Supercruise Overcharge activated")
+        if sc_sco_is_active_ls and not self.sc_sco_is_active:
+            self.ap_ckb('log+vce', "Supercruise Overcharge deactivated")
+
+        # Protection if SCO is active
+        if self.sc_sco_is_active:
+            if self.status.get_flag(FlagsOverHeating):
+                logger.info("SCO Aborting, overheating")
+                self.ap_ckb('log+vce', "SCO Aborting, overheating")
+                self.keys.send('UseBoostJuice')
+            elif self.status.get_flag(FlagsLowFuel):
+                logger.info("SCO Aborting, < 25% fuel")
+                self.ap_ckb('log+vce', "SCO Aborting, < 25% fuel")
+                self.keys.send('UseBoostJuice')
+            elif self.jn.ship_state()['fuel_percent'] < self.config['FuelThreasholdAbortAP']:
+                logger.info("SCO Aborting, < users low fuel threshold")
+                self.ap_ckb('log+vce', "SCO Aborting, < users low fuel threshold")
+                self.keys.send('UseBoostJuice')
+
+        # Check SC Disengage, but only when not in SC Overcharge
+        if not self.sc_sco_is_active:
+            # Enable one or the other!
+            # self._sc_disengage_active = self.sc_disengage(self.scrReg)
+
+            # if self.sc_disengage_label_up(scr_reg):
+            # If active, latch active flag and let it be reset when out of SC
+            if not self._sc_disengage_active:
+                self._sc_disengage_active = self.sc_disengage_ocr(self.scrReg)
+        # else:
+        #     self._sc_disengage_active = False
 
     def undock(self):
         """ Performs menu action to undock from Station """

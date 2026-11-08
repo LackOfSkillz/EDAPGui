@@ -90,7 +90,10 @@ Aids with colonization construction projects, determining what commodities are n
 # Installation
 _Requires **python 3** and **git**_
 
-_Python 3.11.9 is the recommended version of Python. Python 3.9 or 3.10 may also be used._
+_Python 3.11.9 is the recommended version of Python. Python 3.12 or 3.13 may also be used. Python 3.9 and 3.10 are **not** supported (several required packages are 3.11+ only), and 3.14 isn't supported yet (no PaddlePaddle build)._
+<!-- Fork RP2: corrected. The readme said 3.9 or 3.10 may be used, but the pinned requirements can't install on them. -->
+
+_If an earlier install with Python 3.9 or 3.10 failed, just install 3.11 and run `start_ed_ap.bat` again: it detects the old `venv` folder and rebuilds it._
 If you don't have Python installed:
 * Here is a link to [Python 3.11.9 installer](https://www.python.org/downloads/release/python-3119/). 
 * Scroll to the bottom and select the installer with the description "Recommended".

@@ -24,3 +24,6 @@ configs/ship_configs.json
 test/match/
 debug-output/
 runs/
+
+# Fork RP2: Python caches anywhere (running the offline tests creates them under test/offline/).
+__pycache__/

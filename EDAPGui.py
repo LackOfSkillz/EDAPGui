@@ -1197,8 +1197,12 @@ class APGui:
         blk_keys = ttk.LabelFrame(blk_settings, text="KEYS", padding=(10, 5))
         blk_keys.grid(row=2, column=0, padx=2, pady=2, sticky="NSEW")
         self.checkboxvar['Activate Elite for each key'] = tk.BooleanVar()
-        cb_activate_elite = ttk.Checkbutton(blk_keys, text='Activate Elite for each key', variable=self.checkboxvar['Activate Elite for each key'], command=(lambda field='Activate Elite for each key': self.check_cb(field)))
+        cb_activate_elite = ttk.Checkbutton(blk_keys, text='Keep Elite focused (now automatic)', variable=self.checkboxvar['Activate Elite for each key'], command=(lambda field='Activate Elite for each key': self.check_cb(field)))
         cb_activate_elite.grid(row=0, column=0, columnspan=2, sticky=tk.W)
+        # Fork RP2: the focus guard (EDKeys.ensure_focus) now always keeps keys going to Elite, so this option no
+        # longer does anything. Shown greyed out with a new label so it doesn't mislead; the setting is kept so
+        # existing config files still load.
+        cb_activate_elite.state(['disabled'])
         self.entries['keys'] = self.makeform(blk_keys, FORM_TYPE_SPINBOX, keys_entry_fields, 1, 0.01)
 
         # voice settings block

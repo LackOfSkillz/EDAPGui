@@ -9,6 +9,24 @@ from numpy import array, sum
 import cv2
 from datetime import datetime
 
+from EDlogger import logger
+from JsonFile import write_json_atomic, backup_unreadable_file
+
+
+def _read_calibration_file(calibration_file: str) -> dict | None:
+    """ Reads the OCR calibration file. Returns None if it can't be read or parsed.
+    Fork RP2: added. The loaders used json.load directly, so a truncated or corrupt calibration file raised
+    on startup in every screen that loads calibration. """
+    try:
+        with open(calibration_file, 'r') as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+        logger.warning(f"'{calibration_file}' does not contain a JSON object. Using built-in regions.")
+    except (OSError, ValueError) as e:
+        logger.warning(f"Could not read '{calibration_file}': {e}. Using built-in regions.")
+    return None
+
 """
 File:Screen_Regions.py    
 
@@ -257,8 +275,11 @@ def load_calibrated_regions(prefix: str, reg: dict):
 
     calibration_file = 'configs/ocr_calibration.json'
     if os.path.exists(calibration_file):
-        with open(calibration_file, 'r') as f:
-            calibrated_regions = json.load(f)
+        # Fork RP2: read via _read_calibration_file so a corrupt file falls back to built-in regions
+        # instead of raising.
+        calibrated_regions = _read_calibration_file(calibration_file)
+        if calibrated_regions is None:
+            return
 
         # Go through all regions in this class
         for key1, value1 in reg.items():
@@ -288,8 +309,11 @@ def load_calibrated_regions_quad(prefix: str, reg_quad: dict[str, Quad]):
 
     calibration_file = 'configs/ocr_calibration.json'
     if os.path.exists(calibration_file):
-        with open(calibration_file, 'r') as f:
-            calibrated_regions = json.load(f)
+        # Fork RP2: read via _read_calibration_file so a corrupt file falls back to built-in regions
+        # instead of raising.
+        calibrated_regions = _read_calibration_file(calibration_file)
+        if calibrated_regions is None:
+            return
 
         # Go through all regions in this class
         for key1, value1 in reg_quad.items():
@@ -467,15 +491,20 @@ def load_default_calib_data() -> dict[str, MyRegion]:
         # "EDStationServicesInShip.size.mission_item": {"width": 100, "height": 15},
     }
 
-    if not os.path.exists(calibration_file):
+    # Fork RP2: a calibration file that exists but can't be read is kept as a backup and treated as missing,
+    # instead of raising on startup.
+    default_calib_data = None
+    if os.path.exists(calibration_file):
+        default_calib_data = _read_calibration_file(calibration_file)
+        if default_calib_data is None:
+            backup_unreadable_file(calibration_file)
+
+    if default_calib_data is None:
         # Create the file with default values if it doesn't exist
-        with open(calibration_file, 'w') as f:
-            json.dump(default_regions, f, indent=4)
+        # Fork RP2: atomic write (see JsonFile.write_json_atomic).
+        write_json_atomic(default_regions, calibration_file)
         default_calib_data = default_regions
     else:
-        with open(calibration_file, 'r') as f:
-            default_calib_data = json.load(f)
-
         # Check for missing keys and add them
         updated = False
         for key, value in default_regions.items():
@@ -485,8 +514,8 @@ def load_default_calib_data() -> dict[str, MyRegion]:
 
         # If we updated the data, save it back to the file
         if updated:
-            with open(calibration_file, 'w') as f:
-                json.dump(default_calib_data, f, indent=4)
+            # Fork RP2: atomic write (see JsonFile.write_json_atomic).
+            write_json_atomic(default_calib_data, calibration_file)
 
     return default_calib_data
 

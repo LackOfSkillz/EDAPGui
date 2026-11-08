@@ -99,7 +99,13 @@ class EDGalaxyMap:
         ap.keys.send('UI_Select')
         sleep(2)
 
-        typewrite(target_name, interval=0.25)
+        # Fork RP2: typed one character at a time with the focus guard before each, so a window that takes focus
+        # mid-way doesn't receive the rest of the system name. Same 0.25 s between characters as before
+        # (_pause=False: otherwise pyautogui adds its own 0.1 s after every call).
+        for ch in target_name:
+            ap.keys.ensure_focus()
+            typewrite(ch, _pause=False)
+            sleep(0.25)
         sleep(1)
 
         # send enter key
@@ -155,7 +161,13 @@ class EDGalaxyMap:
         sleep(0.05)
 
         # type in the System name
-        typewrite(target_name_uc, interval=0.25)
+        # Fork RP2: typed one character at a time with the focus guard before each, so a window that takes focus
+        # mid-way doesn't receive the rest of the system name. Same 0.25 s between characters as before
+        # (_pause=False: otherwise pyautogui adds its own 0.1 s after every call).
+        for ch in target_name_uc:
+            ap.keys.ensure_focus()
+            typewrite(ch, _pause=False)
+            sleep(0.25)
         logger.debug(f"Entered system name: {target_name_uc}.")
         sleep(0.05)
 

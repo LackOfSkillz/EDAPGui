@@ -8,6 +8,7 @@ from typing import TypedDict
 
 from EDlogger import logger
 from FleetCarrierMonitorDataParser import FleetCarrierMonitorDataParser, FleetCarrierCargo
+from JsonFile import write_json_atomic
 
 
 class ResourcesRequired(TypedDict):
@@ -447,9 +448,10 @@ def write_json_file(data, filepath: str):
     if data is None:
         return False
     try:
-        with open(filepath, "w", encoding='utf-8') as fp:
-            json.dump(data, fp, indent=4)
-            return True
+        # Fork RP2: atomic write. This saves AP.json and ship_configs.json (and colonisation data); writing in
+        # place meant a crash mid-save left a truncated file that was then replaced with defaults on next start.
+        write_json_atomic(data, filepath)
+        return True
     except Exception as e:
         logger.warning(f"write_json_file error for filepath '{filepath}':" + str(e))
         return False

@@ -8,6 +8,7 @@ from EDJournal import StationType
 from EDKeys import EDKeys
 from EDlogger import logger
 import json
+from JsonFile import write_json_atomic
 from MarketParser import MarketParser
 from MousePt import MousePoint
 from pathlib import Path
@@ -157,8 +158,9 @@ class EDWayPoint:
             data = self.waypoints
         try:
             self.ap.config['WaypointFilepath'] = filename
-            with open(filename, "w") as fp:
-                json.dump(data, fp, indent=4)
+            # Fork RP2: atomic write. Waypoint progress ('Completed') is saved during runs; writing in place
+            # meant a crash mid-save could leave a truncated waypoint file that then refused to load.
+            write_json_atomic(data, filename)
         except Exception as e:
             logger.warning("EDWayPoint.py write_waypoints error:" + str(e))
 

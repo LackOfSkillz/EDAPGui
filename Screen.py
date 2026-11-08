@@ -1,17 +1,21 @@
 from __future__ import annotations
+import ctypes
 import time
 import typing
 from copy import copy
 
 import cv2
+import win32api
 import win32con
 import win32gui
+import win32process
 import numpy as np
 from numpy import array
 import mss
 import json
 
 from EDlogger import logger
+from JsonFile import write_json_atomic
 from Screen_Regions import Quad
 
 """
@@ -32,23 +36,85 @@ Author: sumzer0@yahoo.com
 elite_dangerous_window = "Elite - Dangerous (CLIENT)"
 
 
-def set_focus_elite_window():
+def get_elite_window_handle() -> int:
+    """ Returns the Elite Dangerous window handle, or 0 if the game window isn't found.
+    Fork RP2: added for the focus guard (see EDKeys.ensure_focus). """
+    return win32gui.FindWindow(None, elite_dangerous_window)
+
+
+def is_elite_foreground() -> bool:
+    """ True if the Elite Dangerous window currently has focus, i.e. simulated keys will reach it.
+    Fork RP2: added for the focus guard. Compares window handles rather than titles. """
+    handle = get_elite_window_handle()
+    return handle != 0 and win32gui.GetForegroundWindow() == handle
+
+
+def _is_hung_window(window: int) -> bool:
+    """ True if Windows considers the window hung ('Not Responding'). Fork RP2: added for set_focus_elite_window.
+    Returns False if the check itself fails, so focusing still gets attempted. """
+    try:
+        return bool(ctypes.windll.user32.IsHungAppWindow(window))
+    except Exception:
+        return False
+
+
+def set_focus_elite_window() -> bool:
     """ set focus to the ED window, if ED does not have focus then the keystrokes will go to the window
-    that does have focus. """
-    ed_title = "Elite - Dangerous (CLIENT)"
+    that does have focus.
+    Fork RP2: now returns whether ED has focus afterwards, and tries harder. The original:
+     - called ShowWindow(SW_NORMAL) every time, which can resize the game window; now it only restores a
+       minimised window,
+     - made one SetForegroundWindow attempt, which Windows often refuses for a background program (its
+       foreground lock), and hid the failure with a bare except and a print. Now, if the plain attempt
+       fails, it attaches to the input of the window that has focus, which Windows does allow, and tries
+       again.
+    @return: True if ED has focus, False if the game window wasn't found or couldn't be brought forward.
+    """
+    handle = get_elite_window_handle()
+    if handle == 0:
+        return False
 
-    # TODO - determine if GetWindowText is faster than FindWindow if ED is in foreground
-    if win32gui.GetWindowText(win32gui.GetForegroundWindow()) == ed_title:
-        return
+    foreground = win32gui.GetForegroundWindow()
+    if foreground == handle:
+        return True
 
-    handle = win32gui.FindWindow(0, ed_title)
-    if handle != 0:
+    try:
+        if win32gui.IsIconic(handle):
+            win32gui.ShowWindow(handle, win32con.SW_RESTORE)
+        win32gui.SetForegroundWindow(handle)  # give focus to ED
+    except Exception:
+        pass  # Refused by Windows' foreground lock; try the fallback below.
+    if win32gui.GetForegroundWindow() == handle:
+        return True
+
+    # Fallback: temporarily attach our thread's input to the thread that owns the focused window. Windows
+    # then treats the request as coming from the foreground and allows it.
+    our_thread = win32api.GetCurrentThreadId()
+    foreground = win32gui.GetForegroundWindow()
+    foreground_thread = win32process.GetWindowThreadProcessId(foreground)[0] if foreground else 0
+    attached = False
+    try:
+        # Not if that window is hung ('Not Responding'): attaching to its input can stall the autopilot thread.
+        if foreground_thread and foreground_thread != our_thread and not _is_hung_window(foreground):
+            win32process.AttachThreadInput(our_thread, foreground_thread, True)
+            attached = True
+        # Separate tries: pywin32 raises when BringWindowToTop fails, which would skip SetForegroundWindow,
+        # the call that matters.
         try:
-            win32gui.ShowWindow(handle, win32con.SW_NORMAL)  # give focus to ED
-            win32gui.SetForegroundWindow(handle)  # give focus to ED
-        except:
-            print("set_focus_elite_window ERROR")
-            pass
+            win32gui.BringWindowToTop(handle)
+        except Exception as e:
+            logger.debug(f"set_focus_elite_window: BringWindowToTop failed: {e}")
+        win32gui.SetForegroundWindow(handle)
+    except Exception as e:
+        logger.debug(f"set_focus_elite_window: fallback failed: {e}")
+    finally:
+        if attached:
+            try:
+                win32process.AttachThreadInput(our_thread, foreground_thread, False)
+            except Exception:
+                pass
+
+    return win32gui.GetForegroundWindow() == handle
 
 
 def crop_image_by_pct(image, quad: Quad):
@@ -217,8 +283,8 @@ class Screen:
         if data is None:
             data = self.scales
         try:
-            with open(filename, "w") as fp:
-                json.dump(data, fp, indent=4)
+            # Fork RP2: atomic write, so a crash mid-save can't leave a truncated resolution.json.
+            write_json_atomic(data, filename)
         except Exception as e:
             logger.warning("Screen.py write_config error:" + str(e))
 
